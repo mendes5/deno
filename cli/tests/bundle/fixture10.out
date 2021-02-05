@@ -1,6 +1,0 @@
-const a = "a";
-const a1 = a;
-const o = {
-};
-const { a: a2 = a1  } = o;
-console.log(a2);
