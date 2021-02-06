@@ -52,8 +52,7 @@ pub struct ModuleSource {
 
 pub type PrepareLoadFuture =
   dyn Future<Output = (ModuleLoadId, Result<RecursiveModuleLoad, AnyError>)>;
-pub type ModuleSourceFuture =
-  dyn Future<Output = Result<ModuleSource, AnyError>>;
+pub type ModuleSourceFuture = dyn Future<Output = Result<ModuleSource, AnyError>>;
 
 pub trait ModuleLoader {
   /// Returns an absolute URL.
@@ -125,8 +124,7 @@ impl ModuleLoader for NoopModuleLoader {
     _maybe_referrer: Option<ModuleSpecifier>,
     _is_dyn_import: bool,
   ) -> Pin<Box<ModuleSourceFuture>> {
-    async { Err(generic_error("Module loading is not supported")) }
-      .boxed_local()
+    async { Err(generic_error("Module loading is not supported")) }.boxed_local()
   }
 }
 
@@ -152,7 +150,7 @@ impl ModuleLoader for FsModuleLoader {
     &self,
     _op_state: Rc<RefCell<OpState>>,
     module_specifier: &ModuleSpecifier,
-    _maybe_referrer: Option<ModuleSpecifier>,
+    maybe_referrer: Option<ModuleSpecifier>,
     _is_dynamic: bool,
   ) -> Pin<Box<ModuleSourceFuture>> {
     let module_specifier = module_specifier.clone();
@@ -163,13 +161,44 @@ impl ModuleLoader for FsModuleLoader {
           module_specifier
         ))
       })?;
-      let code = std::fs::read_to_string(path)?;
-      let module = ModuleSource {
-        code,
-        module_url_specified: module_specifier.to_string(),
-        module_url_found: module_specifier.to_string(),
-      };
-      Ok(module)
+
+      let code = std::fs::read_to_string(path.clone());
+
+      match code {
+        Ok(code) => {
+          let module = ModuleSource {
+            code,
+            module_url_specified: module_specifier.to_string(),
+            module_url_found: module_specifier.to_string(),
+          };
+          Ok(module)
+        }
+        Err(error) => match error.kind() {
+          std::io::ErrorKind::NotFound => {
+            if let Some(referrer) = maybe_referrer {
+              match referrer.as_url().to_file_path() {
+                Ok(referrer) => Err(generic_error(format!(
+                  "Failed to find file \"{}\" from \"{}\"",
+                  path.to_string_lossy(),
+                  referrer.to_string_lossy()
+                ))),
+                Err(_) => Err(generic_error(format!(
+                  "Failed to find file  \"{}\" from \"{}\"",
+                  path.to_string_lossy(),
+                  "<failed-to-find-parent-module>"
+                ))),
+              }
+            } else {
+              Err(generic_error(format!(
+                "Failed to find file at \"{}\" from \"{}\"",
+                path.to_string_lossy(),
+                "<failed-to-find-parent-module>"
+              )))
+            }
+          }
+          _ => Err(AnyError::from(error)),
+        },
+      }
     }
     .boxed_local()
   }
@@ -224,8 +253,7 @@ impl RecursiveModuleLoad {
     loader: Rc<dyn ModuleLoader>,
   ) -> Self {
     let kind = Kind::DynamicImport;
-    let state =
-      LoadState::ResolveImport(specifier.to_owned(), referrer.to_owned());
+    let state = LoadState::ResolveImport(specifier.to_owned(), referrer.to_owned());
     Self::new(op_state, kind, state, loader)
   }
 
@@ -254,23 +282,20 @@ impl RecursiveModuleLoad {
   pub async fn prepare(self) -> (ModuleLoadId, Result<Self, AnyError>) {
     let (module_specifier, maybe_referrer) = match self.state {
       LoadState::ResolveMain(ref specifier, _) => {
-        let spec =
-          match self
-            .loader
-            .resolve(self.op_state.clone(), specifier, ".", true)
-          {
-            Ok(spec) => spec,
-            Err(e) => return (self.id, Err(e)),
-          };
+        let spec = match self
+          .loader
+          .resolve(self.op_state.clone(), specifier, ".", true)
+        {
+          Ok(spec) => spec,
+          Err(e) => return (self.id, Err(e)),
+        };
         (spec, None)
       }
       LoadState::ResolveImport(ref specifier, ref referrer) => {
-        let spec = match self.loader.resolve(
-          self.op_state.clone(),
-          specifier,
-          referrer,
-          false,
-        ) {
+        let spec = match self
+          .loader
+          .resolve(self.op_state.clone(), specifier, referrer, false)
+        {
           Ok(spec) => spec,
           Err(e) => return (self.id, Err(e)),
         };
@@ -303,22 +328,22 @@ impl RecursiveModuleLoad {
           .loader
           .resolve(self.op_state.clone(), specifier, ".", true)?
       }
-      LoadState::ResolveImport(ref specifier, ref referrer) => self
-        .loader
-        .resolve(self.op_state.clone(), specifier, referrer, false)?,
+      LoadState::ResolveImport(ref specifier, ref referrer) => {
+        self
+          .loader
+          .resolve(self.op_state.clone(), specifier, referrer, false)?
+      }
 
       _ => unreachable!(),
     };
 
     let load_fut = match &self.state {
-      LoadState::ResolveMain(_, Some(code)) => {
-        futures::future::ok(ModuleSource {
-          code: code.to_owned(),
-          module_url_specified: module_specifier.to_string(),
-          module_url_found: module_specifier.to_string(),
-        })
-        .boxed()
-      }
+      LoadState::ResolveMain(_, Some(code)) => futures::future::ok(ModuleSource {
+        code: code.to_owned(),
+        module_url_specified: module_specifier.to_string(),
+        module_url_found: module_specifier.to_string(),
+      })
+      .boxed(),
       _ => self
         .loader
         .load(
@@ -336,11 +361,7 @@ impl RecursiveModuleLoad {
     Ok(())
   }
 
-  pub fn add_import(
-    &mut self,
-    specifier: ModuleSpecifier,
-    referrer: ModuleSpecifier,
-  ) {
+  pub fn add_import(&mut self, specifier: ModuleSpecifier, referrer: ModuleSpecifier) {
     if !self.is_pending.contains(&specifier) {
       let fut = self.loader.load(
         self.op_state.clone(),
@@ -357,10 +378,7 @@ impl RecursiveModuleLoad {
 impl Stream for RecursiveModuleLoad {
   type Item = Result<ModuleSource, AnyError>;
 
-  fn poll_next(
-    self: Pin<&mut Self>,
-    cx: &mut Context,
-  ) -> Poll<Option<Self::Item>> {
+  fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
     let inner = self.get_mut();
     match inner.state {
       LoadState::ResolveMain(..) | LoadState::ResolveImport(..) => {
@@ -516,10 +534,7 @@ impl Modules {
     self.handles_by_id.get(&id).cloned()
   }
 
-  pub fn get_info(
-    &self,
-    global: &v8::Global<v8::Module>,
-  ) -> Option<&ModuleInfo> {
+  pub fn get_info(&self, global: &v8::Global<v8::Module>) -> Option<&ModuleInfo> {
     if let Some(id) = self.ids_by_handle.get(global) {
       return self.info.get(id);
     }
@@ -573,9 +588,7 @@ mod tests {
       "/redirect2.js" => Some((REDIRECT2_SRC, "file:///dir/redirect2.js")),
       "/dir/redirect3.js" => Some((REDIRECT3_SRC, "file:///redirect3.js")),
       "/slow.js" => Some((SLOW_SRC, "file:///slow.js")),
-      "/never_ready.js" => {
-        Some(("should never be Ready", "file:///never_ready.js"))
-      }
+      "/never_ready.js" => Some(("should never be Ready", "file:///never_ready.js")),
       "/main.js" => Some((MAIN_SRC, "file:///main.js")),
       "/bad_import.js" => Some((BAD_IMPORT_SRC, "file:///bad_import.js")),
       // deliberately empty code.
@@ -649,11 +662,10 @@ mod tests {
 
       eprintln!(">> RESOLVING, S: {}, R: {}", specifier, referrer);
 
-      let output_specifier =
-        match ModuleSpecifier::resolve_import(specifier, referrer) {
-          Ok(specifier) => specifier,
-          Err(..) => return Err(MockError::ResolveErr.into()),
-        };
+      let output_specifier = match ModuleSpecifier::resolve_import(specifier, referrer) {
+        Ok(specifier) => specifier,
+        Err(..) => return Err(MockError::ResolveErr.into()),
+      };
 
       if mock_source_code(&output_specifier.to_string()).is_some() {
         Ok(output_specifier)
@@ -1005,13 +1017,11 @@ mod tests {
     // In default resolution code should be empty.
     // Instead we explicitly pass in our own code.
     // The behavior should be very similar to /a.js.
-    let spec =
-      ModuleSpecifier::resolve_url("file:///main_with_code.js").unwrap();
+    let spec = ModuleSpecifier::resolve_url("file:///main_with_code.js").unwrap();
     let main_id_fut = runtime
       .load_module(&spec, Some(MAIN_WITH_CODE_SRC.to_owned()))
       .boxed_local();
-    let main_id =
-      futures::executor::block_on(main_id_fut).expect("Failed to load");
+    let main_id = futures::executor::block_on(main_id_fut).expect("Failed to load");
 
     futures::executor::block_on(runtime.mod_evaluate(main_id)).unwrap();
 
