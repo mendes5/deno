@@ -6,7 +6,6 @@ use std::cell::Cell;
 use std::convert::TryFrom;
 use std::io::{stdout, Write};
 use std::option::Option;
-use url::Url;
 use v8::MapFnTo;
 
 lazy_static! {
@@ -17,9 +16,6 @@ lazy_static! {
       },
       v8::ExternalReference {
         function: set_macrotask_callback.map_fn_to()
-      },
-      v8::ExternalReference {
-        function: eval_context.map_fn_to()
       },
       v8::ExternalReference {
         function: queue_microtask.map_fn_to()
@@ -81,18 +77,14 @@ pub fn initialize_context<'s>(
 
   let scope = &mut v8::ContextScope::new(scope, context);
 
-  let deno_key = v8::String::new(scope, "Deno").unwrap();
-  let deno_val = v8::Object::new(scope);
-  global.set(scope, deno_key.into(), deno_val.into());
-
-  let core_key = v8::String::new(scope, "core").unwrap();
-  let core_val = v8::Object::new(scope);
-  deno_val.set(scope, core_key.into(), core_val.into());
+  let runtime_key = v8::String::new(scope, "runtime").unwrap();
+  let runtime_val = v8::Object::new(scope);
+  global.set(scope, runtime_key.into(), runtime_val.into());
 
   let print_key = v8::String::new(scope, "print").unwrap();
   let print_tmpl = v8::FunctionTemplate::new(scope, print);
   let print_val = print_tmpl.get_function(scope).unwrap();
-  core_val.set(scope, print_key.into(), print_val.into());
+  runtime_val.set(scope, print_key.into(), print_val.into());
 
   let set_macrotask_callback_key =
     v8::String::new(scope, "setMacrotaskCallback").unwrap();
@@ -100,17 +92,11 @@ pub fn initialize_context<'s>(
     v8::FunctionTemplate::new(scope, set_macrotask_callback);
   let set_macrotask_callback_val =
     set_macrotask_callback_tmpl.get_function(scope).unwrap();
-  core_val.set(
+  runtime_val.set(
     scope,
     set_macrotask_callback_key.into(),
     set_macrotask_callback_val.into(),
   );
-
-  let eval_context_key = v8::String::new(scope, "evalContext").unwrap();
-  let eval_context_tmpl = v8::FunctionTemplate::new(scope, eval_context);
-  let eval_context_val = eval_context_tmpl.get_function(scope).unwrap();
-  core_val.set(scope, eval_context_key.into(), eval_context_val.into());
-
 
   let get_promise_details_key =
     v8::String::new(scope, "getPromiseDetails").unwrap();
@@ -118,7 +104,7 @@ pub fn initialize_context<'s>(
     v8::FunctionTemplate::new(scope, get_promise_details);
   let get_promise_details_val =
     get_promise_details_tmpl.get_function(scope).unwrap();
-  core_val.set(
+  runtime_val.set(
     scope,
     get_promise_details_key.into(),
     get_promise_details_val.into(),
@@ -130,7 +116,7 @@ pub fn initialize_context<'s>(
     v8::FunctionTemplate::new(scope, get_proxy_details);
   let get_proxy_details_val =
     get_proxy_details_tmpl.get_function(scope).unwrap();
-  core_val.set(
+  runtime_val.set(
     scope,
     get_proxy_details_key.into(),
     get_proxy_details_val.into(),
@@ -318,129 +304,6 @@ fn set_macrotask_callback(
   };
 
   slot.replace(v8::Global::new(scope, cb));
-}
-
-fn eval_context(
-  scope: &mut v8::HandleScope,
-  args: v8::FunctionCallbackArguments,
-  mut rv: v8::ReturnValue,
-) {
-  let source = match v8::Local::<v8::String>::try_from(args.get(0)) {
-    Ok(s) => s,
-    Err(_) => {
-      let msg = v8::String::new(scope, "Invalid argument").unwrap();
-      let exception = v8::Exception::type_error(scope, msg);
-      scope.throw_exception(exception);
-      return;
-    }
-  };
-
-  let url = v8::Local::<v8::String>::try_from(args.get(1))
-    .map(|n| Url::from_file_path(n.to_rust_string_lossy(scope)).unwrap());
-
-  let output = v8::Array::new(scope, 2);
-  /*
-   output[0] = result
-   output[1] = ErrorInfo | null
-     ErrorInfo = {
-       thrown: Error | any,
-       isNativeError: boolean,
-       isCompileError: boolean,
-     }
-  */
-  let tc_scope = &mut v8::TryCatch::new(scope);
-  let name =
-    v8::String::new(tc_scope, url.as_ref().map_or("<unknown>", Url::as_str))
-      .unwrap();
-  let origin = script_origin(tc_scope, name);
-  let maybe_script = v8::Script::compile(tc_scope, source, Some(&origin));
-
-  if maybe_script.is_none() {
-    assert!(tc_scope.has_caught());
-    let exception = tc_scope.exception().unwrap();
-
-    let js_zero = v8::Integer::new(tc_scope, 0);
-    let js_null = v8::null(tc_scope);
-    output.set(tc_scope, js_zero.into(), js_null.into());
-
-    let errinfo_obj = v8::Object::new(tc_scope);
-
-    let is_compile_error_key =
-      v8::String::new(tc_scope, "isCompileError").unwrap();
-    let is_compile_error_val = v8::Boolean::new(tc_scope, true);
-    errinfo_obj.set(
-      tc_scope,
-      is_compile_error_key.into(),
-      is_compile_error_val.into(),
-    );
-
-    let is_native_error_key =
-      v8::String::new(tc_scope, "isNativeError").unwrap();
-    let is_native_error_val =
-      v8::Boolean::new(tc_scope, exception.is_native_error());
-    errinfo_obj.set(
-      tc_scope,
-      is_native_error_key.into(),
-      is_native_error_val.into(),
-    );
-
-    let thrown_key = v8::String::new(tc_scope, "thrown").unwrap();
-    errinfo_obj.set(tc_scope, thrown_key.into(), exception);
-
-    let js_one = v8::Integer::new(tc_scope, 1);
-    output.set(tc_scope, js_one.into(), errinfo_obj.into());
-
-    rv.set(output.into());
-    return;
-  }
-
-  let result = maybe_script.unwrap().run(tc_scope);
-
-  if result.is_none() {
-    assert!(tc_scope.has_caught());
-    let exception = tc_scope.exception().unwrap();
-
-    let js_zero = v8::Integer::new(tc_scope, 0);
-    let js_null = v8::null(tc_scope);
-    output.set(tc_scope, js_zero.into(), js_null.into());
-
-    let errinfo_obj = v8::Object::new(tc_scope);
-
-    let is_compile_error_key =
-      v8::String::new(tc_scope, "isCompileError").unwrap();
-    let is_compile_error_val = v8::Boolean::new(tc_scope, false);
-    errinfo_obj.set(
-      tc_scope,
-      is_compile_error_key.into(),
-      is_compile_error_val.into(),
-    );
-
-    let is_native_error_key =
-      v8::String::new(tc_scope, "isNativeError").unwrap();
-    let is_native_error_val =
-      v8::Boolean::new(tc_scope, exception.is_native_error());
-    errinfo_obj.set(
-      tc_scope,
-      is_native_error_key.into(),
-      is_native_error_val.into(),
-    );
-
-    let thrown_key = v8::String::new(tc_scope, "thrown").unwrap();
-    errinfo_obj.set(tc_scope, thrown_key.into(), exception);
-
-    let js_one = v8::Integer::new(tc_scope, 1);
-    output.set(tc_scope, js_one.into(), errinfo_obj.into());
-
-    rv.set(output.into());
-    return;
-  }
-
-  let js_zero = v8::Integer::new(tc_scope, 0);
-  let js_one = v8::Integer::new(tc_scope, 1);
-  let js_null = v8::null(tc_scope);
-  output.set(tc_scope, js_zero.into(), result.unwrap());
-  output.set(tc_scope, js_one.into(), js_null.into());
-  rv.set(output.into());
 }
 
 fn queue_microtask(
