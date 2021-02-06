@@ -37,6 +37,7 @@ use std::rc::Rc;
 use std::sync::Once;
 use std::task::Context;
 use std::task::Poll;
+use v8::MapFnTo;
 
 pub enum Snapshot {
   Static(&'static [u8]),
@@ -573,6 +574,39 @@ impl JsRuntime {
     );
 
     Ok(id)
+  }
+
+  /// Registers a synthetic module
+  ///
+  /// Synthetic modules are just like normal JS modules, but they don't contain any 
+  /// JS source code, their contents are set using the V8 API and are mostly
+  /// functions from native code, objects and other values.
+  pub fn register_synthetic_module<'a>(
+    &mut self,
+    name: &str,
+    exports: Vec<&str>,
+    evaluator: impl MapFnTo<v8::SyntheticModuleEvaluationSteps<'a>>,
+  ) {
+    let state_rc = Self::state(self.v8_isolate());
+    let context = self.global_context();
+    let scope = &mut v8::HandleScope::with_context(self.v8_isolate(), context);
+
+    let export_names = exports
+      .iter()
+      .map(|name| v8::String::new(scope, name).unwrap())
+      .collect::<Vec<v8::Local<v8::String>>>();
+
+    let module_name = v8::String::new(scope, "synthetic module").unwrap();
+    let module = v8::Module::create_synthetic_module(scope, module_name, &export_names, evaluator);
+
+    let tc_scope = &mut v8::TryCatch::new(scope);
+
+    state_rc.borrow_mut().modules.register(
+      name,
+      true,
+      v8::Global::<v8::Module>::new(tc_scope, module),
+      vec![],
+    );
   }
 
   /// Instantiates a ES module

@@ -29,3 +29,7 @@ url = { version = "2.2.0", features = ["serde"] }
 # These dependencies are only used for the 'http_bench_*_ops' examples.
 [dev-dependencies]
 tokio = { version = "1.1.1", features = ["full"] }
+
+[[example]]
+name = "synthetic"
+path = "examples/main.rs"
