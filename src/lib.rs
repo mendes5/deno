@@ -13,7 +13,6 @@ mod flags;
 mod module_specifier;
 mod modules;
 mod normalize_path;
-pub mod plugin_api;
 mod runtime;
 mod zero_copy_buf;
 
