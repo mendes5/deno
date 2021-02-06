@@ -1,13 +1,6 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
-use crate::error::AnyError;
-use crate::runtime::JsRuntimeState;
 use crate::JsRuntime;
-use crate::Op;
-use crate::OpId;
-use crate::OpTable;
-use crate::ZeroCopyBuf;
-use futures::future::FutureExt;
 use rusty_v8 as v8;
 use std::cell::Cell;
 use std::convert::TryFrom;
@@ -23,28 +16,13 @@ lazy_static! {
         function: print.map_fn_to()
       },
       v8::ExternalReference {
-        function: recv.map_fn_to()
-      },
-      v8::ExternalReference {
-        function: send.map_fn_to()
-      },
-      v8::ExternalReference {
         function: set_macrotask_callback.map_fn_to()
       },
       v8::ExternalReference {
         function: eval_context.map_fn_to()
       },
       v8::ExternalReference {
-        getter: shared_getter.map_fn_to()
-      },
-      v8::ExternalReference {
         function: queue_microtask.map_fn_to()
-      },
-      v8::ExternalReference {
-        function: encode.map_fn_to()
-      },
-      v8::ExternalReference {
-        function: decode.map_fn_to()
       },
       v8::ExternalReference {
         function: get_promise_details.map_fn_to()
@@ -116,16 +94,6 @@ pub fn initialize_context<'s>(
   let print_val = print_tmpl.get_function(scope).unwrap();
   core_val.set(scope, print_key.into(), print_val.into());
 
-  let recv_key = v8::String::new(scope, "recv").unwrap();
-  let recv_tmpl = v8::FunctionTemplate::new(scope, recv);
-  let recv_val = recv_tmpl.get_function(scope).unwrap();
-  core_val.set(scope, recv_key.into(), recv_val.into());
-
-  let send_key = v8::String::new(scope, "send").unwrap();
-  let send_tmpl = v8::FunctionTemplate::new(scope, send);
-  let send_val = send_tmpl.get_function(scope).unwrap();
-  core_val.set(scope, send_key.into(), send_val.into());
-
   let set_macrotask_callback_key =
     v8::String::new(scope, "setMacrotaskCallback").unwrap();
   let set_macrotask_callback_tmpl =
@@ -143,15 +111,6 @@ pub fn initialize_context<'s>(
   let eval_context_val = eval_context_tmpl.get_function(scope).unwrap();
   core_val.set(scope, eval_context_key.into(), eval_context_val.into());
 
-  let encode_key = v8::String::new(scope, "encode").unwrap();
-  let encode_tmpl = v8::FunctionTemplate::new(scope, encode);
-  let encode_val = encode_tmpl.get_function(scope).unwrap();
-  core_val.set(scope, encode_key.into(), encode_val.into());
-
-  let decode_key = v8::String::new(scope, "decode").unwrap();
-  let decode_tmpl = v8::FunctionTemplate::new(scope, decode);
-  let decode_val = decode_tmpl.get_function(scope).unwrap();
-  core_val.set(scope, decode_key.into(), decode_val.into());
 
   let get_promise_details_key =
     v8::String::new(scope, "getPromiseDetails").unwrap();
@@ -177,9 +136,6 @@ pub fn initialize_context<'s>(
     get_proxy_details_val.into(),
   );
 
-  let shared_key = v8::String::new(scope, "shared").unwrap();
-  core_val.set_accessor(scope, shared_key.into(), shared_getter);
-
   // Direct bindings on `window`.
   let queue_microtask_key = v8::String::new(scope, "queueMicrotask").unwrap();
   let queue_microtask_tmpl = v8::FunctionTemplate::new(scope, queue_microtask);
@@ -191,19 +147,6 @@ pub fn initialize_context<'s>(
   );
 
   scope.escape(context)
-}
-
-pub fn boxed_slice_to_uint8array<'sc>(
-  scope: &mut v8::HandleScope<'sc>,
-  buf: Box<[u8]>,
-) -> v8::Local<'sc, v8::Uint8Array> {
-  assert!(!buf.is_empty());
-  let buf_len = buf.len();
-  let backing_store = v8::ArrayBuffer::new_backing_store_from_boxed_slice(buf);
-  let backing_store_shared = backing_store.make_shared();
-  let ab = v8::ArrayBuffer::with_backing_store(scope, &backing_store_shared);
-  v8::Uint8Array::new(scope, ab, 0, buf_len)
-    .expect("Failed to create UintArray8")
 }
 
 pub extern "C" fn host_import_module_dynamically_callback(
@@ -349,92 +292,7 @@ fn print(
   }
 }
 
-fn recv(
-  scope: &mut v8::HandleScope,
-  args: v8::FunctionCallbackArguments,
-  _rv: v8::ReturnValue,
-) {
-  let state_rc = JsRuntime::state(scope);
-  let mut state = state_rc.borrow_mut();
 
-  let cb = match v8::Local::<v8::Function>::try_from(args.get(0)) {
-    Ok(cb) => cb,
-    Err(err) => return throw_type_error(scope, err.to_string()),
-  };
-
-  let slot = match &mut state.js_recv_cb {
-    slot @ None => slot,
-    _ => return throw_type_error(scope, "Deno.core.recv() already called"),
-  };
-
-  slot.replace(v8::Global::new(scope, cb));
-}
-
-fn send<'s>(
-  scope: &mut v8::HandleScope<'s>,
-  args: v8::FunctionCallbackArguments,
-  mut rv: v8::ReturnValue,
-) {
-  let state_rc = JsRuntime::state(scope);
-  let state = state_rc.borrow_mut();
-
-  let op_id = match v8::Local::<v8::Integer>::try_from(args.get(0))
-    .map_err(AnyError::from)
-    .and_then(|l| OpId::try_from(l.value()).map_err(AnyError::from))
-  {
-    Ok(op_id) => op_id,
-    Err(err) => {
-      let msg = format!("invalid op id: {}", err);
-      let msg = v8::String::new(scope, &msg).unwrap();
-      let exc = v8::Exception::type_error(scope, msg);
-      scope.throw_exception(exc);
-      return;
-    }
-  };
-
-  let buf_iter = (1..args.length()).map(|idx| {
-    v8::Local::<v8::ArrayBufferView>::try_from(args.get(idx))
-      .map(|view| ZeroCopyBuf::new(scope, view))
-      .map_err(|err| {
-        let msg = format!("Invalid argument at position {}: {}", idx, err);
-        let msg = v8::String::new(scope, &msg).unwrap();
-        v8::Exception::type_error(scope, msg)
-      })
-  });
-
-  let bufs = match buf_iter.collect::<Result<_, _>>() {
-    Ok(bufs) => bufs,
-    Err(exc) => {
-      scope.throw_exception(exc);
-      return;
-    }
-  };
-
-  let op = OpTable::route_op(op_id, state.op_state.clone(), bufs);
-  assert_eq!(state.shared.size(), 0);
-  match op {
-    Op::Sync(buf) if !buf.is_empty() => {
-      rv.set(boxed_slice_to_uint8array(scope, buf).into());
-    }
-    Op::Sync(_) => {}
-    Op::Async(fut) => {
-      let fut2 = fut.map(move |buf| (op_id, buf));
-      state.pending_ops.push(fut2.boxed_local());
-      state.have_unpolled_ops.set(true);
-    }
-    Op::AsyncUnref(fut) => {
-      let fut2 = fut.map(move |buf| (op_id, buf));
-      state.pending_unref_ops.push(fut2.boxed_local());
-      state.have_unpolled_ops.set(true);
-    }
-    Op::NotFound => {
-      let msg = format!("Unknown op id: {}", op_id);
-      let msg = v8::String::new(scope, &msg).unwrap();
-      let exc = v8::Exception::type_error(scope, msg);
-      scope.throw_exception(exc);
-    }
-  }
-}
 
 fn set_macrotask_callback(
   scope: &mut v8::HandleScope,
@@ -585,89 +443,6 @@ fn eval_context(
   rv.set(output.into());
 }
 
-fn encode(
-  scope: &mut v8::HandleScope,
-  args: v8::FunctionCallbackArguments,
-  mut rv: v8::ReturnValue,
-) {
-  let text = match v8::Local::<v8::String>::try_from(args.get(0)) {
-    Ok(s) => s,
-    Err(_) => {
-      let msg = v8::String::new(scope, "Invalid argument").unwrap();
-      let exception = v8::Exception::type_error(scope, msg);
-      scope.throw_exception(exception);
-      return;
-    }
-  };
-  let text_str = text.to_rust_string_lossy(scope);
-  let text_bytes = text_str.as_bytes().to_vec().into_boxed_slice();
-
-  let buf = if text_bytes.is_empty() {
-    let ab = v8::ArrayBuffer::new(scope, 0);
-    v8::Uint8Array::new(scope, ab, 0, 0).expect("Failed to create UintArray8")
-  } else {
-    let buf_len = text_bytes.len();
-    let backing_store =
-      v8::ArrayBuffer::new_backing_store_from_boxed_slice(text_bytes);
-    let backing_store_shared = backing_store.make_shared();
-    let ab = v8::ArrayBuffer::with_backing_store(scope, &backing_store_shared);
-    v8::Uint8Array::new(scope, ab, 0, buf_len)
-      .expect("Failed to create UintArray8")
-  };
-
-  rv.set(buf.into())
-}
-
-fn decode(
-  scope: &mut v8::HandleScope,
-  args: v8::FunctionCallbackArguments,
-  mut rv: v8::ReturnValue,
-) {
-  let view = match v8::Local::<v8::ArrayBufferView>::try_from(args.get(0)) {
-    Ok(view) => view,
-    Err(_) => {
-      let msg = v8::String::new(scope, "Invalid argument").unwrap();
-      let exception = v8::Exception::type_error(scope, msg);
-      scope.throw_exception(exception);
-      return;
-    }
-  };
-
-  let backing_store = view.buffer(scope).unwrap().get_backing_store();
-  let buf = unsafe {
-    get_backing_store_slice(
-      &backing_store,
-      view.byte_offset(),
-      view.byte_length(),
-    )
-  };
-
-  // Strip BOM
-  let buf =
-    if buf.len() >= 3 && buf[0] == 0xef && buf[1] == 0xbb && buf[2] == 0xbf {
-      &buf[3..]
-    } else {
-      buf
-    };
-
-  // If `String::new_from_utf8()` returns `None`, this means that the
-  // length of the decoded string would be longer than what V8 can
-  // handle. In this case we return `RangeError`.
-  //
-  // For more details see:
-  // - https://encoding.spec.whatwg.org/#dom-textdecoder-decode
-  // - https://github.com/denoland/deno/issues/6649
-  // - https://github.com/v8/v8/blob/d68fb4733e39525f9ff0a9222107c02c28096e2a/include/v8.h#L3277-L3278
-  match v8::String::new_from_utf8(scope, &buf, v8::NewStringType::Normal) {
-    Some(text) => rv.set(text.into()),
-    None => {
-      let msg = v8::String::new(scope, "string too long").unwrap();
-      let exception = v8::Exception::range_error(scope, msg);
-      scope.throw_exception(exception);
-    }
-  };
-}
-
 fn queue_microtask(
   scope: &mut v8::HandleScope,
   args: v8::FunctionCallbackArguments,
@@ -681,33 +456,6 @@ fn queue_microtask(
       scope.throw_exception(exception);
     }
   };
-}
-
-fn shared_getter(
-  scope: &mut v8::HandleScope,
-  _name: v8::Local<v8::Name>,
-  _args: v8::PropertyCallbackArguments,
-  mut rv: v8::ReturnValue,
-) {
-  let state_rc = JsRuntime::state(scope);
-  let mut state = state_rc.borrow_mut();
-  let JsRuntimeState {
-    shared_ab, shared, ..
-  } = &mut *state;
-
-  // Lazily initialize the persistent external ArrayBuffer.
-  let shared_ab = match shared_ab {
-    Some(ref ab) => v8::Local::new(scope, ab),
-    slot @ None => {
-      let ab = v8::SharedArrayBuffer::with_backing_store(
-        scope,
-        shared.get_backing_store(),
-      );
-      slot.replace(v8::Global::new(scope, ab));
-      ab
-    }
-  };
-  rv.set(shared_ab.into())
 }
 
 // Called by V8 during `Isolate::mod_instantiate`.
@@ -733,7 +481,6 @@ pub fn module_resolve_callback<'s>(
   let resolved_specifier = state
     .loader
     .resolve(
-      state.op_state.clone(),
       &specifier_str,
       &referrer_name,
       false,
