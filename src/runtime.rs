@@ -25,7 +25,6 @@ use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use futures::stream::StreamFuture;
 use futures::task::AtomicWaker;
-use futures::Future;
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -1456,7 +1455,7 @@ pub mod tests {
       _module_specifier: &ModuleSpecifier,
       _maybe_referrer: Option<String>,
       _is_dyn_import: bool,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AnyError>>>> {
+    ) -> Pin<Box<dyn futures::Future<Output = Result<(), AnyError>>>> {
       self.prepare_load_count.fetch_add(1, Ordering::Relaxed);
       async { Ok(()) }.boxed_local()
     }
