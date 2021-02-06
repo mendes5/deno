@@ -6,4 +6,4 @@ This is forked from [denoland/deno](https://github.com/denoland/deno), everythin
  - [x] no ops
  - [] no global api
  - [x] no shared queue
- - [] no resource ids
+ - [x] no resource ids
