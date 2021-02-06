@@ -183,8 +183,6 @@ impl JsRuntime {
       unsafe { v8_init() };
     });
 
-    let has_startup_snapshot = options.startup_snapshot.is_some();
-
     let global_context;
     let (mut isolate, maybe_snapshot_creator) = if options.will_snapshot {
       // TODO(ry) Support loading snapshots before snapshotting.
@@ -255,18 +253,12 @@ impl JsRuntime {
       waker: AtomicWaker::new(),
     })));
 
-    let mut js_runtime = Self {
+    Self {
       v8_isolate: Some(isolate),
       snapshot_creator: maybe_snapshot_creator,
       has_snapshotted: false,
       allocations: IsolateAllocations::default(),
-    };
-
-    if !has_startup_snapshot {
-      js_runtime.js_init();
     }
-
-    js_runtime
   }
 
   pub fn global_context(&mut self) -> v8::Global<v8::Context> {
@@ -294,18 +286,6 @@ impl JsRuntime {
   pub(crate) fn state(isolate: &v8::Isolate) -> Rc<RefCell<JsRuntimeState>> {
     let s = isolate.get_slot::<Rc<RefCell<JsRuntimeState>>>().unwrap();
     s.clone()
-  }
-
-  /// Executes a JavaScript code to provide Deno.core and error reporting.
-  ///
-  /// This function can be called during snapshotting.
-  fn js_init(&mut self) {
-    self
-      .execute("deno:core/core.js", include_str!("core.js"))
-      .unwrap();
-    self
-      .execute("deno:core/error.js", include_str!("error.js"))
-      .unwrap();
   }
 
   /// Executes traditional JavaScript code (traditional = not ES modules)
@@ -502,11 +482,7 @@ impl JsRuntimeState {
   ) {
     debug!("dyn_import specifier {} referrer {} ", specifier, referrer);
 
-    let load = RecursiveModuleLoad::dynamic_import(
-      specifier,
-      referrer,
-      self.loader.clone(),
-    );
+    let load = RecursiveModuleLoad::dynamic_import(specifier, referrer, self.loader.clone());
     self.dyn_import_map.insert(load.id, resolver_handle);
     self.waker.wake();
     let fut = load.prepare().boxed_local();
@@ -586,10 +562,7 @@ impl JsRuntime {
     for i in 0..module.get_module_requests_length() {
       let import_specifier = module.get_module_request(i).to_rust_string_lossy(tc_scope);
       let state = state_rc.borrow();
-      let module_specifier =
-        state
-          .loader
-          .resolve(&import_specifier, name, false)?;
+      let module_specifier = state.loader.resolve(&import_specifier, name, false)?;
       import_specifiers.push(module_specifier);
     }
 

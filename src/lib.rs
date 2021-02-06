@@ -14,7 +14,6 @@ mod module_specifier;
 mod modules;
 mod normalize_path;
 pub mod plugin_api;
-mod resources;
 mod runtime;
 mod zero_copy_buf;
 
@@ -50,9 +49,6 @@ pub use crate::modules::ModuleSourceFuture;
 pub use crate::modules::NoopModuleLoader;
 pub use crate::modules::RecursiveModuleLoad;
 pub use crate::normalize_path::normalize_path;
-pub use crate::resources::Resource;
-pub use crate::resources::ResourceId;
-pub use crate::resources::ResourceTable;
 pub use crate::runtime::GetErrorClassFn;
 pub use crate::runtime::JsErrorCreateFn;
 pub use crate::runtime::JsRuntime;
